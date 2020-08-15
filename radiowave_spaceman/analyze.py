@@ -64,43 +64,8 @@ class Context(object):
         self.previous_passes = previous_passes
         self.closure = closure
 
-    def copy_with(self, **kwargs):
-        references = kwargs.pop("references", self.references)
-        symboltable = kwargs.pop("symboltable", self.symboltable)
-        previous_passes = kwargs.pop("previous_passes", self.previous_passes)
-        closure = kwargs.pop("closure", self.closure)
-        return Context(references, symboltable, previous_passes, closure)
-
 
 def analyze_function(function, references, argument_name, argument_ref):
-    python_version = float(sys.version[0:3])
-    is_pypy = "__pypy__" in sys.builtin_module_names
-
-    parser = uncompyle6.parser.get_python_parser(
-        python_version,
-        debug_parser=dict(spark_parser.DEFAULT_DEBUG),
-        compile_mode="exec",
-        is_pypy=is_pypy,
-    )
-
-    scanner = uncompyle6.scanner.get_scanner(
-        python_version,
-        is_pypy=is_pypy,
-    )
-
-    tokens, customize = scanner.ingest(
-        function.__code__,
-        code_objects={},
-        show_asm=False,
-    )
-
-    parsed = uncompyle6.parser.parse(
-        parser,
-        tokens,
-        customize,
-        function.__code__,
-    )
-
     ### fails if any cells have not been filled yet
     # closurevars = inspect.getclosurevars(function)
     # closure = dict(closurevars.globals)
@@ -117,15 +82,36 @@ def analyze_function(function, references, argument_name, argument_ref):
     symboltable = SymbolTable(None)
     symboltable[argument_name] = argument_ref
 
-    previous_passes = set()
-    while len(symboltable) > 0:
-        current_pass = set(symboltable)
+    analyze_code(function.__code__, closure, symboltable, references, False, set())
 
+
+def analyze_code(code, closure, symboltable, references, single_pass, previous_passes):
+    python_version = float(sys.version[0:3])
+    is_pypy = "__pypy__" in sys.builtin_module_names
+
+    parser = uncompyle6.parser.get_python_parser(
+        python_version,
+        debug_parser=dict(spark_parser.DEFAULT_DEBUG),
+        compile_mode="exec",
+        is_pypy=is_pypy,
+    )
+    scanner = uncompyle6.scanner.get_scanner(python_version, is_pypy=is_pypy)
+    tokens, customize = scanner.ingest(code, code_objects={}, show_asm=False)
+    parsed = uncompyle6.parser.parse(parser, tokens, customize, code)
+
+    if single_pass:
         handle(parsed, Context(references, symboltable, previous_passes, closure))
 
-        for symbol in current_pass:
-            del symboltable[symbol]
-        previous_passes.update(current_pass)
+    else:
+        previous_passes = set()
+        while len(symboltable) > 0:
+            current_pass = set(symboltable)
+
+            handle(parsed, Context(references, symboltable, previous_passes, closure))
+
+            for symbol in current_pass:
+                del symboltable[symbol]
+            previous_passes.update(current_pass)
 
 
 handlers = {}
@@ -158,8 +144,9 @@ def handle_LOAD_NAME(node, context):
         return None
 
 
-handlers["LOAD_FAST"] = handle_LOAD_NAME
 handlers["LOAD_NAME"] = handle_LOAD_NAME
+handlers["LOAD_FAST"] = handle_LOAD_NAME
+handlers["LOAD_DEREF"] = handle_LOAD_NAME
 
 
 def handle_attribute(node, context):
@@ -239,3 +226,51 @@ def handle_call(node, context):
 
 handlers["call"] = handle_call
 handlers["call_kw36"] = handle_call
+
+
+def handle_mkfunc(node, context):
+    if node[0].kind == "LOAD_CODE":
+        codenode = node[0]
+    else:
+        codenode = node[1]
+
+    code = codenode.attr
+    symboltable = SymbolTable(context.symboltable)
+    for name in code.co_varnames[:code.co_argcount]:
+        symboltable[name] = None
+
+    analyze_code(
+        code,
+        context.closure,
+        symboltable,
+        context.references,
+        True,
+        context.previous_passes)
+    return None
+
+
+handlers["mkfunc"] = handle_mkfunc
+
+
+def handle_mklambda(node, context):
+    if node[0].kind == "LOAD_LAMBDA":
+        lambdanode = node[0]
+    else:
+        lambdanode = node[1]
+
+    code = lambdanode.attr
+    symboltable = SymbolTable(context.symboltable)
+    for name in code.co_varnames[:code.co_argcount]:
+        symboltable[name] = None
+
+    analyze_code(
+        code,
+        context.closure,
+        symboltable,
+        context.references,
+        True,
+        context.previous_passes)
+    return None
+
+
+handlers["mklambda"] = handle_mklambda

@@ -107,5 +107,27 @@ def test_5():
         ("two",),
     ])
 
+
 def another_another_function(x, other, some):
     y = x + some.two
+
+
+def test_6():
+    @radiowave_spaceman.decorator("dataset")
+    def function(dataset):
+        def shadowed(dataset):
+            dataset.y
+
+        def not_shadowed(other):
+            dataset.z
+
+        lambda dataset: dataset.yy
+        lambda q: dataset.zz
+
+        dataset.x
+
+    assert function.dataset() == set([
+        ("x",),
+        ("z",),
+        ("zz",),
+    ])
