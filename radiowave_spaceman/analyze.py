@@ -10,6 +10,13 @@ import spark_parser
 
 
 def decorator(argument_name):
+    """
+    Attaches an attribute named by "argument_name" to the decorated function,
+    which is a function that searches for references to that argument.
+
+    See the unit tests for examples.
+    """
+
     def get_function(function):
         def get_references():
             references = set()
@@ -24,6 +31,16 @@ def decorator(argument_name):
 
 
 class SymbolTable(object):
+    """
+    Mapping from symbol name to references/partial references.
+
+    SymbolTables are chained: if a symbol is not found in this table, it defers
+    to its parent (until reaching the root table). The chain of SymbolTables
+    represents lexically nested scopes.
+
+    References can be set to "None" to shadow symbols in the parent's scope.
+    """
+
     def __init__(self, parent):
         self.parent = parent
         self.symbols = {}
@@ -58,6 +75,12 @@ class SymbolTable(object):
 
 
 class Context(object):
+    """
+    Grab-bag of data required by each parsing tree handler.
+
+    (Better than maintaining long argument lists.)
+    """
+
     def __init__(self, references, symboltable, previous_passes, closure):
         self.references = references
         self.symboltable = symboltable
@@ -86,9 +109,18 @@ def analyze_function(function, references, argument_name, argument_ref):
 
 
 def analyze_code(code, closure, symboltable, references, single_pass, previous_passes):
+    """
+    This function uses uncompyle6 to parse the Python bytecode, resulting in a
+    parsing tree (forerunner of an abstract syntax tree or AST).
+
+    This parsing tree is passed to "handle", which recursively walks over it.
+
+    A single-pass is used for nested functions, multiple passes for the top-level.
+    """
+
+    # this block is all uncompyle6
     python_version = float(sys.version[0:3])
     is_pypy = "__pypy__" in sys.builtin_module_names
-
     parser = uncompyle6.parser.get_python_parser(
         python_version,
         debug_parser=dict(spark_parser.DEFAULT_DEBUG),
@@ -99,9 +131,14 @@ def analyze_code(code, closure, symboltable, references, single_pass, previous_p
     tokens, customize = scanner.ingest(code, code_objects={}, show_asm=False)
     parsed = uncompyle6.parser.parse(parser, tokens, customize, code)
 
+    # single pass for nested functions and lambdas because they're already part
+    # of the multi-pass run on the top-level function
     if single_pass:
         handle(parsed, Context(references, symboltable, previous_passes, closure))
 
+    # multiple passes over the function to handle cases like test_4, in which a
+    # symbol may be used lexically BEFORE the assignment that associates it with
+    # a watched symbol
     else:
         previous_passes = set()
         while len(symboltable) > 0:
@@ -109,6 +146,7 @@ def analyze_code(code, closure, symboltable, references, single_pass, previous_p
 
             handle(parsed, Context(references, symboltable, previous_passes, closure))
 
+            # only search for symbols we haven't searched for before
             for symbol in current_pass:
                 del symboltable[symbol]
             previous_passes.update(current_pass)
@@ -118,6 +156,14 @@ handlers = {}
 
 
 def handle(node, context):
+    """
+    Recursive function for analyzing one parsing tree node.
+
+    This function dispatches to specialized handlers, with a default.
+
+    Returns None or a reference/partial reference.
+    """
+
     if node.kind in handlers:
         return handlers[node.kind](node, context)
     else:
@@ -125,6 +171,13 @@ def handle(node, context):
 
 
 def handle_default(node, context):
+    """
+    Default handler for any parsing tree node kind.
+
+    Most specialized handlers also call this function to recurse through a
+    node's children.
+    """
+
     results = set()
     for subnode in node:
         result = handle(subnode, context)
