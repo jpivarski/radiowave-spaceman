@@ -3,4 +3,4 @@
 from __future__ import absolute_import
 
 from radiowave_spaceman.analyze import decorator
-from radiowave_spaceman.analyze import Unknown
+

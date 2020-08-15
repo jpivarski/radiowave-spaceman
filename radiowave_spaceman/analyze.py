@@ -3,6 +3,7 @@
 from __future__ import absolute_import
 
 import sys
+import inspect
 
 import uncompyle6
 import spark_parser
@@ -10,28 +11,16 @@ import spark_parser
 
 def decorator(argument_name):
     def get_function(function):
-        references = set()
-        setattr(function, argument_name, references)
+        def get_references():
+            references = set()
+            analyze_function(function, references, argument_name, ())
+            return references
 
-        analyze_function(function, references, argument_name)
+        setattr(function, argument_name, get_references)
 
         return function
 
     return get_function
-
-
-class Unknown(object):
-    def __repr__(self):
-        return "Unknown"
-
-    def __hash__(self):
-        return hash(Unknown)
-
-    def __eq__(self, other):
-        return other is Unknown or isinstance(other, Unknown)
-
-    def __ne__(self, other):
-        return not self == other
 
 
 class SymbolTable(object):
@@ -69,19 +58,21 @@ class SymbolTable(object):
 
 
 class Context(object):
-    def __init__(self, references, symboltable, previous_passes):
+    def __init__(self, references, symboltable, previous_passes, closure):
         self.references = references
         self.symboltable = symboltable
         self.previous_passes = previous_passes
+        self.closure = closure
 
     def copy_with(self, **kwargs):
         references = kwargs.pop("references", self.references)
         symboltable = kwargs.pop("symboltable", self.symboltable)
         previous_passes = kwargs.pop("previous_passes", self.previous_passes)
-        return Context(references, symboltable, previous_passes)
+        closure = kwargs.pop("closure", self.closure)
+        return Context(references, symboltable, previous_passes, closure)
 
 
-def analyze_function(function, references, argument_name):
+def analyze_function(function, references, argument_name, argument_ref):
     python_version = float(sys.version[0:3])
     is_pypy = "__pypy__" in sys.builtin_module_names
 
@@ -110,14 +101,27 @@ def analyze_function(function, references, argument_name):
         function.__code__,
     )
 
+    ### fails if any cells have not been filled yet
+    # closurevars = inspect.getclosurevars(function)
+    # closure = dict(closurevars.globals)
+    # closure.update(closurevars.nonlocals)
+
+    closure = dict(function.__globals__)
+    if function.__closure__ is not None:
+        for var, cell in zip(function.__code__.co_freevars, function.__closure__):
+            try:
+                closure[var] = cell.cell_contents
+            except ValueError:
+                pass   # the cell has not been filled yet, so ignore it
+
     symboltable = SymbolTable(None)
-    symboltable[argument_name] = ()
+    symboltable[argument_name] = argument_ref
 
     previous_passes = set()
     while len(symboltable) > 0:
         current_pass = set(symboltable)
 
-        handle(parsed, Context(references, symboltable, previous_passes))
+        handle(parsed, Context(references, symboltable, previous_passes, closure))
 
         for symbol in current_pass:
             del symboltable[symbol]
@@ -135,15 +139,16 @@ def handle(node, context):
 
 
 def handle_default(node, context):
-    output = None
+    results = set()
     for subnode in node:
-        out = handle(subnode, context)
-        if out is not None:
-            if output is None:
-                output = out
-            elif output != out:
-                output = Unknown()
-    return output
+        result = handle(subnode, context)
+        if result is not None:
+            results.add(result)
+
+    if len(results) == 1:
+        return list(results)[0]
+    else:
+        return None
 
 
 def handle_LOAD_NAME(node, context):
@@ -177,9 +182,47 @@ def handle_assign(node, context):
             symbol = node[1][0].pattr
             if symbol not in context.previous_passes:
                 context.symboltable[symbol] = ref
-        else:
-            context.references.add(ref + (Unknown(),))
     return None
 
 
 handlers["assign"] = handle_assign
+
+
+def handle_call(node, context):
+    if node.kind == "call":
+        argnodes = node[1:-1]
+        kwnames = [None] * len(argnodes)
+
+    elif node.kind == "call_kw36":
+        argnodes = node[1:-2]
+        kwnames = node[-2].pattr
+        kwnames = [None] * (len(argnodes) - len(kwnames)) + list(kwnames)
+
+    argvalues = [handle(argnode, context) for argnode in argnodes]
+    args = []
+    kwargs = {}
+    for name, value in zip(kwnames, argvalues):
+        if name is None:
+            args.append(value)
+        else:
+            kwargs[name] = value
+
+    if node[0].kind == "expr":
+        if node[0][0].kind == "LOAD_GLOBAL" or node[0][0].kind == "LOAD_DEREF":
+            function_name = node[0][0].pattr
+            if function_name in context.closure:
+                function = context.closure[function_name]
+                signature = inspect.signature(function)
+                try:
+                    binding = signature.bind(*args, **kwargs)
+                except TypeError:
+                    pass
+                else:
+                    for name, ref in binding.arguments.items():
+                        analyze_function(function, context.references, name, ref)
+
+    return handle_default(node, context)
+
+
+handlers["call"] = handle_call
+handlers["call_kw36"] = handle_call
