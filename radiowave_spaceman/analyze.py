@@ -33,14 +33,22 @@ class Unknown(object):
     def __ne__(self, other):
         return not self == other
 
-    def __add__(self, other):
-        return Unknown()
-
 
 class SymbolTable(object):
     def __init__(self, parent):
         self.parent = parent
         self.symbols = {}
+
+    def __len__(self):
+        return len(self.symbols)
+
+    def __contains__(self, symbol):
+        if symbol in self.symbols:
+            return True
+        elif self.parent is not None:
+            return symbol in self.parent
+        else:
+            return False
 
     def __getitem__(self, symbol):
         if symbol in self.symbols:
@@ -53,20 +61,24 @@ class SymbolTable(object):
     def __setitem__(self, symbol, value):
         self.symbols[symbol] = value
 
+    def __delitem__(self, symbol):
+        del self.symbols[symbol]
+
+    def __iter__(self):
+        return iter(self.symbols)
+
 
 class Context(object):
-    def __init__(self, argument_name, references, symboltable, indent):
-        self.argument_name = argument_name
+    def __init__(self, references, symboltable, previous_passes):
         self.references = references
         self.symboltable = symboltable
-        self.indent = indent
+        self.previous_passes = previous_passes
 
     def copy_with(self, **kwargs):
-        argument_name = kwargs.pop("argument_name", self.argument_name)
         references = kwargs.pop("references", self.references)
         symboltable = kwargs.pop("symboltable", self.symboltable)
-        indent = kwargs.pop("indent", self.indent)
-        return Context(argument_name, references, symboltable, indent)
+        previous_passes = kwargs.pop("previous_passes", self.previous_passes)
+        return Context(references, symboltable, previous_passes)
 
 
 def analyze_function(function, references, argument_name):
@@ -98,29 +110,34 @@ def analyze_function(function, references, argument_name):
         function.__code__,
     )
 
-    context = Context(argument_name, references, SymbolTable(None), "")
-    handle(parsed, context)
+    symboltable = SymbolTable(None)
+    symboltable[argument_name] = ()
+
+    previous_passes = set()
+    while len(symboltable) > 0:
+        current_pass = set(symboltable)
+
+        handle(parsed, Context(references, symboltable, previous_passes))
+
+        for symbol in current_pass:
+            del symboltable[symbol]
+        previous_passes.update(current_pass)
 
 
 handlers = {}
 
 
 def handle(node, context):
-    print(context.indent + node.kind)
-
     if node.kind in handlers:
-        tmp = handlers[node.kind](node, context)
+        return handlers[node.kind](node, context)
     else:
-        tmp = handle_default(node, context)
-
-    print(context.indent + repr(tmp))
-    return tmp
+        return handle_default(node, context)
 
 
 def handle_default(node, context):
     output = None
     for subnode in node:
-        out = handle(subnode, context.copy_with(indent=context.indent + "    "))
+        out = handle(subnode, context)
         if out is not None:
             if output is None:
                 output = out
@@ -130,8 +147,8 @@ def handle_default(node, context):
 
 
 def handle_LOAD_NAME(node, context):
-    if node.pattr == context.argument_name:
-        return ()
+    if node.pattr in context.symboltable:
+        return context.symboltable[node.pattr]
     else:
         return None
 
@@ -151,3 +168,18 @@ def handle_attribute(node, context):
 
 
 handlers["attribute"] = handle_attribute
+
+
+def handle_assign(node, context):
+    ref = handle(node[0], context)
+    if ref is not None:
+        if len(node[1]) == 1:
+            symbol = node[1][0].pattr
+            if symbol not in context.previous_passes:
+                context.symboltable[symbol] = ref
+        else:
+            context.references.add(ref + (Unknown(),))
+    return None
+
+
+handlers["assign"] = handle_assign
