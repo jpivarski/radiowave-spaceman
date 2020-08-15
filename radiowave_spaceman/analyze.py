@@ -3,7 +3,7 @@
 from __future__ import absolute_import
 
 import sys
-import inspect
+# import inspect
 
 import uncompyle6
 import spark_parser
@@ -212,14 +212,27 @@ def handle_call(node, context):
             function_name = node[0][0].pattr
             if function_name in context.closure:
                 function = context.closure[function_name]
-                signature = inspect.signature(function)
-                try:
-                    binding = signature.bind(*args, **kwargs)
-                except TypeError:
-                    pass
-                else:
-                    for name, ref in binding.arguments.items():
-                        analyze_function(function, context.references, name, ref)
+
+                ### the inspect module, with its version-dependent interface,
+                ### is not strictly needed here: the code below works, too
+                # signature = inspect.signature(function)
+                # try:
+                #     binding = signature.bind(*args, **kwargs)
+                # except TypeError:
+                #     pass
+                # else:
+                #     for name, ref in binding.arguments.items():
+                #         analyze_function(function, context.references, name, ref)
+
+                code = function.__code__
+                for pos, name in enumerate(code.co_varnames[:code.co_argcount]):
+                    if name in kwargs:
+                        ref = kwargs[name]
+                    elif pos < len(args):
+                        ref = args[pos]
+                    else:
+                        continue
+                    analyze_function(function, context.references, name, ref)
 
     return handle_default(node, context)
 
