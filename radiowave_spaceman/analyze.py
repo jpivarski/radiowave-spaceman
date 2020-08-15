@@ -89,6 +89,19 @@ class Context(object):
 
 
 def analyze_function(function, references, argument_name, argument_ref):
+    """
+    Entry point for analyzing a function.
+
+    This calls "analyze_code" to do most of its work, but if you have a function
+    object, rather than just a code object, you get closure data (symbols that
+    surround the function's definition and may be passed into the function)
+    and it is necessary to make a nested SyntaxTable because Python functions
+    have nested scope.
+
+    (In Python, ONLY functions have nested scope. If this were C, we'd have to
+    make a nested SyntaxTable in every if and for loop.)
+    """
+
     ### fails if any cells have not been filled yet
     # closurevars = inspect.getclosurevars(function)
     # closure = dict(closurevars.globals)
